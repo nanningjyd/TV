@@ -27,6 +27,19 @@ const API_SITES = {
         name: '空内容测试源',
         adult: true
     }
+    dyttzy: {
+        api: 'http://caiji.dyttzyapi.com',
+        name: '电影天堂资源',
+        detail: 'http://caiji.dyttzyapi.com',
+    },
+    ruyi: {
+        api: 'https://cj.rycjapi.com',
+        name: '如意资源',
+    },
+    bfzy: {
+        api: 'https://bfzyapi.com',
+        name: '暴风资源',
+    },
     //ARCHIVE https://telegra.ph/APIs-08-12
 };
 
