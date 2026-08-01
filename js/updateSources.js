@@ -1,25 +1,47 @@
 // js/updateSources.js
 // “更新 / 搜索视频源”功能：
-//   1) 拉取维护源清单（站点自身 sources.json）
-//   2) 扫描可增删的 GitHub 仓库（默认即本项目，可在设置里添加社区 fork 的 sources.json）
-//   3) 自动发现当前没有的新源
-//   4) 对新源做健康检查（复用 SourceHealth）
-//   5) 差异弹窗：可“本机预览更新”（写入 localStorage，立即生效，刷新仍在）或“提交全站”
-//      （POST /api/updatesources，由 Cloudflare Function 写回仓库并触发自动部署）
+//   核心目标：从 GITHUB 上【其他经常维护的仓库】自动发现本站没有的新视频源，
+//            而不是从本站自己仓库里已有的源“自己更新自己”。
+//   流程：
+//   1) 以“当前已激活的源”（内置 + 本机预览扩展 + 自定义）作为已知基线
+//   2) 扫描可增删的【外部 GitHub 仓库】列表（默认是活跃社区 fork，路径多为 js/config.js 或 sources.json）
+//   3) 对每个外部仓库抽取其 API_SITES（兼容 sources.json 的 JSON 与 js/config.js 的内联对象）
+//   4) 找出基线中不存在的新源，做健康检查（复用 SourceHealth）
+//   5) 差异弹窗：可“本机预览更新”（写入 localStorage 立即生效）或“提交全站”
+//      （POST /api/updatesources，由 Cloudflare Function 把【合并后的全量源】写回本站 sources.json 并触发自动部署）
+//
+//   注意：本站自己的 sources.json 只作为“提交全站”时的【写入目标】，不参与发现过程。
 
 const UpdateSources = (function () {
-    const MAINTAINED = 'sources.json';                 // 同域维护清单
-    const DEFAULT_SCAN_REPOS = [                        // 默认扫描仓库（可增删）
-        { owner: 'nanningjyd', repo: 'TV', branch: 'main', path: 'sources.json' }
+    // 默认扫描仓库：其他【活跃维护】的 LibreTV 社区 fork（它们把源内联在 js/config.js 的 API_SITES 中）。
+    // 这些仓库与本站结构一致，能持续提供新源。用户可在设置里增删。
+    const DEFAULT_SCAN_REPOS = [
+        { owner: 'queendou',  repo: 'LibreTV', branch: 'main', path: 'js/config.js' },
+        { owner: 'luosenSvip', repo: 'LibreTV', branch: 'main', path: 'js/config.js' }
     ];
     const SCAN_KEY = 'sourceScanRepos';
 
     function getScanRepos() {
+        let stored = [];
         try {
-            const r = JSON.parse(localStorage.getItem(SCAN_KEY));
-            if (Array.isArray(r) && r.length) return r;
+            const raw = localStorage.getItem(SCAN_KEY);
+            if (raw) {
+                const r = JSON.parse(raw);
+                if (Array.isArray(r)) stored = r;
+            }
         } catch (e) { /* ignore */ }
-        return DEFAULT_SCAN_REPOS.slice();
+        // 迁移：剔除旧的“本站自身仓库”默认项（它不属于“外部发现”的本意）
+        stored = stored.filter(x => !(x && x.owner === 'nanningjyd' && x.repo === 'TV'));
+        // 默认外部仓库始终存在，并与用户手动添加的仓库合并（去重）
+        const merged = DEFAULT_SCAN_REPOS.slice();
+        stored.forEach(s => {
+            const dup = merged.some(m =>
+                m.owner === s.owner && m.repo === s.repo &&
+                (m.branch || 'main') === (s.branch || 'main') &&
+                (m.path || 'sources.json') === (s.path || 'sources.json'));
+            if (!dup) merged.push(s);
+        });
+        return merged;
     }
 
     function setScanRepos(arr) {
@@ -33,74 +55,130 @@ const UpdateSources = (function () {
         catch (e) { return u.replace(/\/+$/, ''); }
     }
 
-    // 经 /proxy/ 抓取任意 JSON（跨域用代理规避 CORS）
-    async function fetchJsonViaProxy(url) {
+    // 经 /proxy/ 抓取任意文本（跨域用代理规避 CORS；文本响应代理正常）
+    async function fetchTextViaProxy(url) {
         const proxied = window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
             ? await window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encodeURIComponent(url))
             : PROXY_URL + encodeURIComponent(url);
         const resp = await fetch(proxied, {
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+            headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' }
         });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        return resp.json();
+        return resp.text();
     }
 
-    async function fetchMaintained() {
+    // 从 js/config.js 这类 JS 文本中抽出 API_SITES 对象（兼容未加引号的键与字符串），
+    // 并正确处理 // 与 /* */ 注释里的花括号。失败返回 null。
+    function extractApiSitesFromJs(text) {
+        const idx = text.indexOf('API_SITES');
+        if (idx < 0) return null;
+        let i = text.indexOf('=', idx);
+        if (i < 0) return null;
+        i++;
+        while (i < text.length && /\s/.test(text[i])) i++;
+        if (text[i] !== '{') return null;
+
+        let depth = 0, inStr = null, end = -1;
+        for (let j = i; j < text.length; j++) {
+            const c = text[j];
+            const c2 = text[j + 1];
+            if (inStr) {
+                if (c === '\\') { j++; continue; }
+                if (c === inStr) inStr = null;
+                continue;
+            }
+            if (c === '/' && c2 === '/') {            // 行注释
+                while (j < text.length && text[j] !== '\n') j++;
+                continue;
+            }
+            if (c === '/' && c2 === '*') {            // 块注释
+                j += 2;
+                while (j < text.length && !(text[j] === '*' && text[j + 1] === '/')) j++;
+                j++;
+                continue;
+            }
+            if (c === '"' || c === "'") { inStr = c; continue; }
+            if (c === '{') depth++;
+            else if (c === '}') {
+                depth--;
+                if (depth === 0) { end = j; break; }
+            }
+        }
+        if (end < 0) return null;
+        const objText = text.slice(i, end + 1);
         try {
-            const resp = await fetch(MAINTAINED, { cache: 'no-store' });
-            if (!resp.ok) return null;
-            const j = await resp.json();
-            return (j && j.API_SITES) ? j.API_SITES : null;
+            // 键未加引号，标准 JSON.parse 不可用，用 Function 求值（源来自管理员/用户配置的公开仓库）
+            return (new Function('return (' + objText + ');'))();
         } catch (e) {
             return null;
         }
     }
 
+    // 抽取某仓库的 API_SITES：先尝试 JSON(含 API_SITES)，否则按 JS 文本解析
     async function fetchRepoSources(repo) {
         const branch = repo.branch || 'main';
         const path = repo.path || 'sources.json';
         const raw = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${branch}/${path}`;
         try {
-            const j = await fetchJsonViaProxy(raw);
-            return (j && j.API_SITES) ? j.API_SITES : null;
+            const text = await fetchTextViaProxy(raw);
+            // 1) JSON 形式（本站/部分仓库的 sources.json）
+            try {
+                const j = JSON.parse(text);
+                if (j && j.API_SITES) return j.API_SITES;
+            } catch (e) { /* 不是 JSON，继续按 JS 处理 */ }
+            // 2) JS 形式（js/config.js 内联 API_SITES）
+            const fromJs = extractApiSitesFromJs(text);
+            return fromJs;
         } catch (e) {
             console.warn('扫描仓库失败:', repo, e);
             return null;
         }
     }
 
-    function mergeInto(all, sites, knownApiUrls, added) {
-        Object.keys(sites || {}).forEach(code => {
-            const site = sites[code];
-            if (!site || !site.api) return;
-            if (all[code]) return;                 // 已收录
-            all[code] = site;
-            if (!knownApiUrls.has(normalizeUrl(site.api))) {
-                added[code] = site;                // 新发现
-            }
-        });
+    // 收集“当前已激活源”的 api URL 与 code，作为已知基线
+    function collectActive(knownApiUrls, knownCodes) {
+        const collect = (obj) => {
+            if (!obj) return;
+            Object.keys(obj).forEach(code => {
+                knownCodes.add(code);
+                const s = obj[code];
+                if (s && s.api) knownApiUrls.add(normalizeUrl(s.api));
+            });
+        };
+        collect(window.API_SITES);
+        try { collect(JSON.parse(localStorage.getItem('extendedAPISites') || '{}')); } catch (e) { /* ignore */ }
+        try {
+            const cust = JSON.parse(localStorage.getItem('customAPIs') || '[]');
+            (Array.isArray(cust) ? cust : []).forEach(c => {
+                if (c && c.url) knownApiUrls.add(normalizeUrl(c.url));
+            });
+        } catch (e) { /* ignore */ }
     }
 
-    // 发现新源：返回 { all, added }
+    // 发现新源：基线(已激活) vs 外部仓库 -> 返回 { all, added }
+    //   added = 外部仓库中有、基线中没有的源
+    //   all   = 基线 + added（提交全站时写回的合并全量）
     async function discover(onStatus) {
-        const all = {};
         const added = {};
         const knownApiUrls = new Set();
-        // 当前已知源（内置 + 已扩展预览）
-        Object.values(window.API_SITES || {}).forEach(s => {
-            if (s && s.api) knownApiUrls.add(normalizeUrl(s.api));
-        });
-
-        if (onStatus) onStatus('正在拉取维护源清单…');
-        const maintained = await fetchMaintained();
-        if (maintained) mergeInto(all, maintained, knownApiUrls, added);
+        const knownCodes = new Set();
+        collectActive(knownApiUrls, knownCodes);
 
         const repos = getScanRepos();
         for (let i = 0; i < repos.length; i++) {
-            if (onStatus) onStatus(`正在扫描仓库 ${repos[i].owner}/${repos[i].repo} (${i + 1}/${repos.length})…`);
-            const s = await fetchRepoSources(repos[i]);
-            if (s) mergeInto(all, s, knownApiUrls, added);
+            if (onStatus) onStatus(`正在扫描外部仓库 ${repos[i].owner}/${repos[i].repo} (${i + 1}/${repos.length})…`);
+            const sites = await fetchRepoSources(repos[i]);
+            if (!sites) continue;
+            Object.keys(sites).forEach(code => {
+                const site = sites[code];
+                if (!site || !site.api) return;
+                if (knownCodes.has(code)) return;                       // 已收录（同 code）
+                if (knownApiUrls.has(normalizeUrl(site.api))) return;   // 已收录（同 api 地址）
+                added[code] = site;                                    // 外部新源
+            });
         }
+
+        const all = Object.assign({}, window.API_SITES, added);
         return { all, added };
     }
 
@@ -108,8 +186,8 @@ const UpdateSources = (function () {
         discover,
         getScanRepos,
         setScanRepos,
-        MAINTAINED,
-        DEFAULT_SCAN_REPOS
+        DEFAULT_SCAN_REPOS,
+        extractApiSitesFromJs
     };
 })();
 
@@ -130,7 +208,7 @@ async function openUpdateSources() {
     const btnC = document.getElementById('btnCommitSources');
     if (btnP) btnP.disabled = true;
     if (btnC) btnC.disabled = true;
-    statusEl.textContent = '开始发现视频源…';
+    statusEl.textContent = '开始从外部 GitHub 仓库发现新视频源…';
     resultsEl.innerHTML = '<div class="text-gray-500">正在分析，请稍候…</div>';
 
     try {
@@ -139,7 +217,7 @@ async function openUpdateSources() {
 
         const addedCodes = Object.keys(added);
         if (addedCodes.length) {
-            statusEl.textContent = `发现 ${addedCodes.length} 个新源，正在进行健康检查…`;
+            statusEl.textContent = `从外部仓库发现 ${addedCodes.length} 个新源，正在进行健康检查…`;
             const results = await SourceHealth.checkMany(addedCodes, {
                 concurrency: 5,
                 onProgress: (d, t) => { statusEl.textContent = `健康检查 ${d}/${t}…`; }
@@ -148,8 +226,8 @@ async function openUpdateSources() {
             if (btnP) btnP.disabled = false;
             if (btnC) btnC.disabled = false;
         } else {
-            statusEl.textContent = '未发现有差异的新视频源（当前已是最新）。';
-            resultsEl.innerHTML = '<div class="text-gray-400 py-4 text-center">扫描到的源都已在列表中，无需更新。</div>';
+            statusEl.textContent = '未发现新的视频源（当前已是最新，或外部仓库暂无新增）。';
+            resultsEl.innerHTML = '<div class="text-gray-400 py-4 text-center">扫描的外部仓库里没有比本站更多的新源，无需更新。</div>';
         }
     } catch (e) {
         statusEl.textContent = '更新失败：' + (e && e.message ? e.message : e);
@@ -159,7 +237,7 @@ async function openUpdateSources() {
 function renderUpdateResults(results, added) {
     const resultsEl = document.getElementById('updateSourcesResults');
     if (!resultsEl) return;
-    let html = '<div class="text-gray-400 mb-2">新发现源（绿=可用 / 红=不可用）：</div>';
+    let html = '<div class="text-gray-400 mb-2">从外部仓库新发现的源（绿=可用 / 红=不可用）：</div>';
     Object.keys(added).forEach(code => {
         const r = results[code] || { alive: null, latencyMs: null, error: '未检测' };
         const dot = r.alive === true ? 'bg-green-400' : (r.alive === false ? 'bg-red-400' : 'bg-gray-500');
@@ -204,7 +282,7 @@ async function commitUpdatedSources() {
     const original = btnC ? btnC.textContent : '';
     if (btnC) { btnC.disabled = true; btnC.textContent = '提交中…'; }
     try {
-        // 合并：当前 API_SITES（含已预览扩展的） + 本次新增
+        // 合并：当前激活源（含已预览扩展的） + 本次从外部发现的新源
         const merged = Object.assign({}, window.API_SITES, _discovered.added);
         const payload = { sites: merged };
         const auth = (window.__ENV__ && window.__ENV__.PASSWORD) || '';
@@ -237,9 +315,9 @@ function renderScanRepos() {
     }
     el.innerHTML = repos.map((r, i) => {
         const branchLabel = (r.branch && r.branch !== 'main') ? '@' + r.branch : '';
-        const pathLabel = (r.path && r.path !== 'sources.json') ? '/' + r.path : '';
+        const pathLabel = (r.path && r.path !== 'sources.json') ? ' › ' + r.path : '';
         return `<div class="flex items-center justify-between bg-[#222] rounded px-2 py-1 mb-1">
-            <span class="text-xs text-gray-300 truncate">${r.owner}/${r.repo}${branchLabel}<span class="text-gray-500">(${r.path || 'sources.json'}${pathLabel})</span></span>
+            <span class="text-xs text-gray-300 truncate">${r.owner}/${r.repo}${branchLabel}<span class="text-gray-500">${pathLabel}</span></span>
             <button onclick="removeScanRepo(${i})" class="text-red-500 hover:text-red-700 text-xs px-1 flex-shrink-0">✕</button>
         </div>`;
     }).join('');
