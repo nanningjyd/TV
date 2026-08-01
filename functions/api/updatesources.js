@@ -98,7 +98,7 @@ export async function onRequestPost(context) {
     }
 }
 
-export async function onOptions() {
+export async function onRequestOptions() {
     return new Response(null, {
         status: 204,
         headers: {
