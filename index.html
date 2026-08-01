@@ -99,11 +99,11 @@
             <div class="p-3 bg-[#151515] rounded-lg shadow-inner">
                 <label class="block text-sm font-medium text-gray-400 mb-3 border-b border-[#333] pb-1">更新视频源</label>
                 <button onclick="openUpdateSources()" class="w-full px-4 py-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white rounded-lg text-sm transition-all duration-300 shadow-md hover:shadow-lg mb-3">更新 / 搜索视频源</button>
-                <div class="text-xs text-gray-500 mb-1">从以下 GitHub 仓库自动发现新源（默认是他人维护的活跃仓库，可增删）：</div>
+                <div class="text-xs text-gray-500 mb-1">从以下来源自动发现 / 同步视频源（GitHub 仓库 或 源列表归档，可增删）：</div>
                 <div id="scanReposList" class="max-h-28 overflow-y-auto bg-[#191919] p-2 rounded-lg mb-2"></div>
                 <div class="flex gap-1">
-                    <input id="scanRepoInput" type="text" placeholder="owner/repo 或 owner/repo@branch" class="flex-1 min-w-0 bg-[#222] border border-[#333] text-white px-2 py-1 rounded text-xs" autocomplete="off">
-                    <button onclick="addScanRepo()" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs flex-shrink-0">添加</button>
+                    <input id="scanRepoInput" type="text" placeholder="owner/repo 或 归档URL(telegra.ph)" class="flex-1 min-w-0 bg-[#222] border border-[#333] text-white px-2 py-1 rounded text-xs" autocomplete="off">
+                    <button onclick="addScanSource()" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs flex-shrink-0">添加</button>
                 </div>
             </div>
 
@@ -401,7 +401,8 @@
             <div id="updateSourcesResults" class="overflow-auto flex-1 bg-[#0a0a0a] rounded p-2 text-sm space-y-1 min-h-[120px]"></div>
             <div class="flex flex-wrap justify-end gap-2 mt-4 flex-none">
                 <button onclick="closeUpdateSources()" class="px-4 py-2 bg-[#333] hover:bg-[#444] text-white rounded text-sm transition-colors">关闭</button>
-                <button id="btnPreviewSources" onclick="previewUpdatedSources()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors" disabled>本机预览更新</button>
+                <button id="btnPreviewNew" onclick="previewNewSources()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors" disabled>合并新源</button>
+                <button id="btnPreviewAll" onclick="previewAllExternal()" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded text-sm transition-colors" disabled>合并全部外部源</button>
                 <button id="btnCommitSources" onclick="commitUpdatedSources()" class="px-4 py-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white rounded text-sm transition-colors" disabled>提交全站</button>
             </div>
         </div>

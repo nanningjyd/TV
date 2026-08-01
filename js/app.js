@@ -67,8 +67,8 @@ document.addEventListener('DOMContentLoaded', function () {
         updateSelectedApiCount();
     });
 
-    // 渲染“更新视频源”里的扫描仓库列表
-    if (typeof renderScanRepos === 'function') renderScanRepos();
+    // 渲染“更新视频源”里的扫描来源列表
+    if (typeof renderScanSources === 'function') renderScanSources();
 });
 
 // 初始化API复选框
