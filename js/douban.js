@@ -529,19 +529,20 @@ function renderDoubanCards(data, container) {
                 .replace(/>/g, '&gt;');
             
             // 处理图片URL
-            // 1. 直接使用豆瓣图片URL (添加no-referrer属性)
+            // 豆瓣图片服务器会拒绝不带 Referer 的请求(返回418)，必须带 origin 级 Referer 才能直连加载。
+            // 直连豆瓣图床即可正常显示，无需走 /proxy/ (代理会把二进制图片当文本处理导致损坏)。
             const originalCoverUrl = item.cover;
-            
-            // 2. 也准备代理URL作为备选
-            const proxiedCoverUrl = PROXY_URL + encodeURIComponent(originalCoverUrl);
-            
+
+            // 加载失败时的占位图(自包含 SVG data URI，不依赖任何外部资源)
+            const posterPlaceholder = "data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%27200%27%20height=%27300%27%3E%3Crect%20width=%27100%25%27%20height=%27100%25%27%20fill=%27%23222%27/%3E%3C/svg%3E";
+
             // 为不同设备优化卡片布局
             card.innerHTML = `
                 <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
-                    <img src="${originalCoverUrl}" alt="${safeTitle}" 
+                    <img src="${originalCoverUrl}" alt="${safeTitle}"
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
-                        onerror="this.onerror=null; this.src='${proxiedCoverUrl}'; this.classList.add('object-contain');"
-                        loading="lazy" referrerpolicy="no-referrer">
+                        onerror="this.onerror=null; this.src='${posterPlaceholder}'; this.classList.add('object-contain');"
+                        loading="lazy" referrerpolicy="origin">
                     <div class="absolute inset-0 bg-gradient-to-t from-black to-transparent opacity-60"></div>
                     <div class="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded-sm">
                         <span class="text-yellow-400">★</span> ${safeRate}
