@@ -115,23 +115,44 @@ const UpdateSources = (function () {
     }
 
     // 抽取某仓库的 API_SITES：先尝试 JSON(含 API_SITES)，否则按 JS 文本解析
-    async function fetchRepoSources(repo) {
+    async function fetchRepoSources(repo, log) {
         const branch = repo.branch || 'main';
         const path = repo.path || 'sources.json';
         const raw = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${branch}/${path}`;
+        if (log) log(`开始拉取 ${repo.owner}/${repo.repo}/${path}`);
         try {
             const text = await fetchTextViaProxy(raw);
+            if (!text || text.length < 50) {
+                if (log) log(`拉取内容过短（${(text || '').length} 字符），可能代理返回了错误页`);
+                return { error: '内容过短', sites: null };
+            }
+            if (log) log(`拉取成功，长度 ${text.length}`);
+
             // 1) JSON 形式（本站/部分仓库的 sources.json）
             try {
                 const j = JSON.parse(text);
-                if (j && j.API_SITES) return j.API_SITES;
-            } catch (e) { /* 不是 JSON，继续按 JS 处理 */ }
+                if (j && j.API_SITES) {
+                    if (log) log(`解析为 JSON sources.json，共 ${Object.keys(j.API_SITES).length} 个源`);
+                    return { error: null, sites: j.API_SITES };
+                }
+            } catch (e) {
+                if (log) log(`不是 JSON 格式: ${e.message}`);
+            }
+
             // 2) JS 形式（js/config.js 内联 API_SITES）
             const fromJs = extractApiSitesFromJs(text);
-            return fromJs;
+            if (fromJs && typeof fromJs === 'object' && Object.keys(fromJs).length) {
+                if (log) log(`从 JS 中抽出 API_SITES，共 ${Object.keys(fromJs).length} 个源`);
+                return { error: null, sites: fromJs };
+            }
+
+            // 3) 都没找到：记录关键片段用于排错
+            const snippet = text.slice(0, 200).replace(/\s+/g, ' ');
+            if (log) log(`未能识别 API_SITES，内容开头: ${snippet}`);
+            return { error: '未找到 API_SITES', snippet, sites: null };
         } catch (e) {
-            console.warn('扫描仓库失败:', repo, e);
-            return null;
+            if (log) log(`拉取失败: ${e.message || e}`);
+            return { error: e.message || String(e), sites: null };
         }
     }
 
@@ -158,16 +179,21 @@ const UpdateSources = (function () {
     // 发现新源：基线(已激活) vs 外部仓库 -> 返回 { all, added }
     //   added = 外部仓库中有、基线中没有的源
     //   all   = 基线 + added（提交全站时写回的合并全量）
-    async function discover(onStatus) {
+    async function discover(onStatus, onLog) {
         const added = {};
         const knownApiUrls = new Set();
         const knownCodes = new Set();
         collectActive(knownApiUrls, knownCodes);
+        if (onLog) onLog(`基线源: code=${knownCodes.size}, apiUrl=${knownApiUrls.size}`);
 
         const repos = getScanRepos();
+        if (onLog) onLog(`扫描仓库数: ${repos.length}`);
+        const diagnostics = [];
+
         for (let i = 0; i < repos.length; i++) {
             if (onStatus) onStatus(`正在扫描外部仓库 ${repos[i].owner}/${repos[i].repo} (${i + 1}/${repos.length})…`);
-            const sites = await fetchRepoSources(repos[i]);
+            const { sites, error, snippet } = await fetchRepoSources(repos[i], onLog);
+            diagnostics.push({ repo: repos[i], error, snippet, count: sites ? Object.keys(sites).length : 0 });
             if (!sites) continue;
             Object.keys(sites).forEach(code => {
                 const site = sites[code];
@@ -179,7 +205,7 @@ const UpdateSources = (function () {
         }
 
         const all = Object.assign({}, window.API_SITES, added);
-        return { all, added };
+        return { all, added, diagnostics };
     }
 
     return {
@@ -212,7 +238,12 @@ async function openUpdateSources() {
     resultsEl.innerHTML = '<div class="text-gray-500">正在分析，请稍候…</div>';
 
     try {
-        const { all, added } = await UpdateSources.discover(msg => { statusEl.textContent = msg; });
+        const logs = [];
+        const pushLog = msg => { logs.push(msg); };
+        const { all, added, diagnostics } = await UpdateSources.discover(
+            msg => { statusEl.textContent = msg; },
+            pushLog
+        );
         _discovered = { all, added };
 
         const addedCodes = Object.keys(added);
@@ -226,11 +257,29 @@ async function openUpdateSources() {
             if (btnP) btnP.disabled = false;
             if (btnC) btnC.disabled = false;
         } else {
-            statusEl.textContent = '未发现新的视频源（当前已是最新，或外部仓库暂无新增）。';
-            resultsEl.innerHTML = '<div class="text-gray-400 py-4 text-center">扫描的外部仓库里没有比本站更多的新源，无需更新。</div>';
+            statusEl.textContent = '未从外部仓库发现新源。';
+            let diagHtml = '<div class="text-gray-400 py-2 text-center">扫描的外部仓库里没有比本站更多的新源。</div>';
+            if (diagnostics && diagnostics.length) {
+                diagHtml += '<div class="mt-2 text-xs text-gray-500 bg-[#111] rounded p-2 max-h-32 overflow-auto"><div class="mb-1 text-gray-400">诊断信息：</div>';
+                diagnostics.forEach(d => {
+                    const repo = `${d.repo.owner}/${d.repo.repo}`;
+                    if (d.error) {
+                        diagHtml += `<div class="text-red-400">• ${repo}: ${escapeHtml(d.error)}${d.snippet ? ' <span class="text-gray-600">' + escapeHtml(d.snippet.slice(0, 60)) + '</span>' : ''}</div>`;
+                    } else {
+                        diagHtml += `<div class="text-green-400">• ${repo}: 解析出 ${d.count} 个源</div>`;
+                    }
+                });
+                diagHtml += '</div>';
+            }
+            // 同时把日志也展示出来，便于定位
+            if (logs.length) {
+                diagHtml += '<div class="mt-2 text-xs text-gray-500 bg-[#111] rounded p-2 max-h-40 overflow-auto"><div class="mb-1 text-gray-400">扫描日志：</div>' + logs.map(l => `<div>• ${escapeHtml(l)}</div>`).join('') + '</div>';
+            }
+            resultsEl.innerHTML = diagHtml;
         }
     } catch (e) {
         statusEl.textContent = '更新失败：' + (e && e.message ? e.message : e);
+        resultsEl.innerHTML = '<div class="text-red-400 py-2 text-center">' + escapeHtml(String(e)) + '</div>';
     }
 }
 
