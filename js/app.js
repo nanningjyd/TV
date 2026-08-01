@@ -454,6 +454,46 @@ function addCustomApi() {
     showToast('已添加自定义API: ' + name, 'success');
 }
 
+// 自动探测并填充源：调用 AddSource.autoDetect，验证域名/接口是否可用
+async function detectAndFillSource() {
+    const urlInput = document.getElementById('customApiUrl');
+    const nameInput = document.getElementById('customApiName');
+    const statusEl = document.getElementById('addApiDetectStatus');
+    const raw = urlInput.value.trim();
+    if (!raw) {
+        statusEl.className = 'text-xs text-yellow-400 mb-1';
+        statusEl.textContent = '请先输入域名或接口地址';
+        return;
+    }
+    statusEl.className = 'text-xs text-gray-400 mb-1';
+    statusEl.textContent = '探测中…（最多约 12 秒）';
+    const btn = document.querySelector('#addCustomApiForm button');
+    if (btn) { btn.disabled = true; btn.classList.add('opacity-60'); }
+    try {
+        if (typeof AddSource === 'undefined' || !AddSource.autoDetect) {
+            statusEl.className = 'text-xs text-red-400 mb-1';
+            statusEl.textContent = '探测模块未加载';
+            return;
+        }
+        const res = await AddSource.autoDetect(raw);
+        if (res.ok) {
+            urlInput.value = res.baseUrl;
+            if (!nameInput.value.trim()) nameInput.value = res.name;
+            statusEl.className = 'text-xs text-emerald-400 mb-1';
+            statusEl.textContent = '✅ 探测成功：' + res.baseUrl + '（' + res.latencyMs + 'ms）已自动填入，点「手动添加」即可保存';
+        } else {
+            statusEl.className = 'text-xs text-red-400 mb-1';
+            statusEl.textContent = '❌ ' + (res.reason || '未找到可用接口');
+        }
+    } catch (e) {
+        statusEl.className = 'text-xs text-red-400 mb-1';
+        statusEl.textContent = '探测出错：' + (e && e.message ? e.message : e);
+    } finally {
+        const b = document.querySelector('#addCustomApiForm button');
+        if (b) { b.disabled = false; b.classList.remove('opacity-60'); }
+    }
+}
+
 // 移除自定义API
 function removeCustomApi(index) {
     if (index < 0 || index >= customAPIs.length) return;
