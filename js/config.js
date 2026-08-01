@@ -131,6 +131,39 @@ function extendAPISites(newSites) {
 window.API_SITES = API_SITES;
 window.extendAPISites = extendAPISites;
 
+// ============ 启动增强：源清单与本地扩展 ============
+// 1) 应用本地预览扩展源（用户点过“本机预览更新”后写入，刷新仍生效）
+// 2) 异步拉取站点 sources.json 作为权威源清单合并进 API_SITES，并通知 UI 重渲染
+(function applySourceEnhancements() {
+    // 立即应用本地扩展
+    try {
+        const ext = JSON.parse(localStorage.getItem('extendedAPISites') || '{}');
+        if (ext && typeof ext === 'object' && Object.keys(ext).length) {
+            extendAPISites(ext);
+        }
+    } catch (e) { /* ignore */ }
+
+    // 拉取服务端维护清单
+    try {
+        fetch('sources.json', { cache: 'no-store' })
+            .then(r => (r && r.ok) ? r.json() : null)
+            .then(j => {
+                if (j && j.API_SITES && typeof j.API_SITES === 'object') {
+                    // 服务端清单合并（新增/覆盖），不删除现有内置源
+                    Object.assign(API_SITES, j.API_SITES);
+                    // 重新应用本地扩展，确保预览源始终在最上层
+                    try {
+                        const ext = JSON.parse(localStorage.getItem('extendedAPISites') || '{}');
+                        if (ext && typeof ext === 'object') extendAPISites(ext);
+                    } catch (e) { /* ignore */ }
+                    window.__SOURCES_UPDATED__ = true;
+                    window.dispatchEvent(new Event('sourcesUpdated'));
+                }
+            })
+            .catch(() => { /* 清单缺失不影响使用 */ });
+    } catch (e) { /* ignore */ }
+})();
+
 
 // 添加聚合搜索的配置选项
 const AGGREGATED_SEARCH_CONFIG = {

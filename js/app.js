@@ -59,6 +59,16 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // 初始检查成人API选中状态
     setTimeout(checkAdultAPIsSelected, 100);
+
+    // 源清单在服务端加载完成后重渲染复选框与计数
+    window.addEventListener('sourcesUpdated', function () {
+        initAPICheckboxes();
+        renderCustomAPIsList();
+        updateSelectedApiCount();
+    });
+
+    // 渲染“更新视频源”里的扫描仓库列表
+    if (typeof renderScanRepos === 'function') renderScanRepos();
 });
 
 // 初始化API复选框
@@ -107,6 +117,9 @@ function initAPICheckboxes() {
     // 初始检查成人内容状态
     checkAdultAPIsSelected();
 }
+
+// 暴露给“更新源”功能：应用预览扩展后重渲染复选框
+window.renderApiCheckboxes = initAPICheckboxes;
 
 // 添加成人API列表
 function addAdultAPI() {
@@ -779,7 +792,8 @@ async function search() {
                             </div>
                             
                             <div class="flex justify-between items-center mt-1 pt-1 border-t border-gray-800">
-                                ${sourceInfo ? `<div>${sourceInfo}</div>` : '<div></div>'}
+                                <div class="flex items-center gap-1 flex-wrap">${sourceInfo}</div>
+                                <span class="health-badge text-xs flex-shrink-0 ml-2" data-code="${sourceCode}">${healthBadgeHtml(sourceCode)}</span>
                                 <!-- 接口名称过长会被挤变形
                                 <div>
                                     <span class="text-gray-500 flex items-center hover:text-blue-400 transition-colors">
@@ -798,6 +812,9 @@ async function search() {
         }).join('');
 
         resultsDiv.innerHTML = safeResults;
+
+        // 更新每个来源的健康状态（先显示缓存，再异步探活刷新）
+        updateResultHealth(allResults);
     } catch (error) {
         console.error('搜索错误:', error);
         if (error.name === 'AbortError') {
@@ -807,6 +824,111 @@ async function search() {
         }
     } finally {
         hideLoading();
+    }
+}
+
+// ============ 源健康状态展示 ============
+function escapeHtml(str) {
+    return (str || '').toString()
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+// 把 source_code 转成可用于属性选择器的安全字符串
+function cssEscapeAttr(code) {
+    return String(code || '').replace(/["\\]/g, '\\$&');
+}
+
+// 根据健康结果渲染徽章 HTML
+function renderHealthBadge(r) {
+    if (!r) {
+        return '<span class="inline-flex items-center gap-1 text-gray-500" title="未检测"><span class="w-1.5 h-1.5 rounded-full bg-gray-500"></span>…</span>';
+    }
+    if (r.alive === true) {
+        const ms = r.latencyMs != null ? (r.latencyMs + 'ms') : '可用';
+        return `<span class="inline-flex items-center gap-1 text-green-400" title="可用${r.latencyMs != null ? '，延时 ' + r.latencyMs + 'ms' : ''}"><span class="w-1.5 h-1.5 rounded-full bg-green-400"></span>${ms}</span>`;
+    }
+    return `<span class="inline-flex items-center gap-1 text-red-400" title="${escapeHtml(r.error || '不可用')}"><span class="w-1.5 h-1.5 rounded-full bg-red-400"></span>不可用</span>`;
+}
+
+// 卡片初始徽章（依据缓存，避免闪烁）
+function healthBadgeHtml(code) {
+    const c = (window.SourceHealth) ? window.SourceHealth.getCached(code) : null;
+    return renderHealthBadge(c);
+}
+
+// 更新某源所有徽章
+function setHealthBadge(code, result) {
+    const sel = '.health-badge[data-code="' + cssEscapeAttr(code) + '"]';
+    document.querySelectorAll(sel).forEach(el => { el.innerHTML = renderHealthBadge(result); });
+}
+
+// 搜索结果渲染后：显示缓存状态并异步探活刷新
+function updateResultHealth(results) {
+    if (!window.SourceHealth || !Array.isArray(results)) return;
+    const codes = [...new Set(results.map(r => r.source_code).filter(Boolean))];
+    codes.forEach(code => {
+        const cached = window.SourceHealth.getCached(code);
+        if (cached) setHealthBadge(code, cached);
+        window.SourceHealth.check(code, false)
+            .then(r => setHealthBadge(code, r))
+            .catch(() => { /* ignore */ });
+    });
+}
+
+// ============ 详情页“换源”功能 ============
+async function showSourceSwitcher(encName) {
+    const name = decodeURIComponent(encName || '');
+    const modalContent = document.getElementById('modalContent');
+    if (!modalContent || !name) return;
+
+    let box = document.getElementById('sourceSwitcher');
+    if (!box) {
+        box = document.createElement('div');
+        box.id = 'sourceSwitcher';
+        box.className = 'mb-4 p-3 bg-[#0a0a0a] rounded border border-[#333]';
+        modalContent.insertBefore(box, modalContent.firstChild);
+    }
+    box.innerHTML = '<div class="text-sm text-gray-300 mb-2">正在在其他源搜索《' + escapeHtml(name) + '》…</div>';
+
+    try {
+        const promises = (selectedAPIs || []).map(id =>
+            (typeof searchByAPIAndKeyWord === 'function') ? searchByAPIAndKeyWord(id, name) : Promise.resolve([])
+        );
+        const arr = await Promise.all(promises);
+        let matches = [];
+        const seen = new Set();
+        arr.forEach(list => {
+            if (Array.isArray(list)) list.forEach(it => {
+                const key = (it.source_code || '') + '_' + (it.vod_id || '');
+                if (!seen.has(key)) { seen.add(key); matches.push(it); }
+            });
+        });
+
+        if (!matches.length) {
+            box.innerHTML = '<div class="text-sm text-gray-400">其他已选源未找到《' + escapeHtml(name) + '》</div>';
+            return;
+        }
+
+        let html = '<div class="text-sm text-gray-300 mb-2">换源（点击在对应源打开，<span class="text-green-400">●</span> 表示该源可播放）：</div>';
+        html += '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">';
+        matches.forEach(it => {
+            const code = it.source_code || '';
+            const safeName = escapeHtml(it.vod_name || '');
+            const id = (it.vod_id != null ? it.vod_id.toString() : '').replace(/[^\w-]/g, '');
+            const found = (it.vod_play_url || it.vod_pic) ? 'text-green-400' : 'text-gray-400';
+            const hb = (window.SourceHealth) ? renderHealthBadge(window.SourceHealth.getCached(code)) : '';
+            html += `<div class="flex items-center justify-between bg-[#191919] rounded px-2 py-1">
+                <span class="text-xs ${found} truncate flex items-center"><span class="text-green-400 mr-1">●</span>${it.source_name || code}<span class="ml-1">${hb}</span></span>
+                <button onclick="showDetails('${id}','${safeName}','${code}')" class="text-blue-400 hover:text-blue-300 text-xs px-2 py-0.5 rounded bg-[#333] flex-shrink-0">打开</button>
+            </div>`;
+        });
+        html += '</div>';
+        box.innerHTML = html;
+    } catch (e) {
+        box.innerHTML = '<div class="text-sm text-red-400">换源搜索失败，请稍后重试</div>';
     }
 }
 
@@ -962,6 +1084,9 @@ async function showDetails(id, vod_name, sourceCode) {
                     </div>
                     <button onclick="copyLinks()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors">
                         复制链接
+                    </button>
+                    <button onclick="showSourceSwitcher('${encodeURIComponent(vod_name || '')}')" class="px-3 py-1.5 bg-[#333] hover:bg-[#444] border border-[#444] rounded text-sm transition-colors">
+                        换源
                     </button>
                 </div>
                 <div id="episodesGrid" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
