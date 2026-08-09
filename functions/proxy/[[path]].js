@@ -172,6 +172,14 @@ export async function onRequest(context) {
         responseHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS"); // 允许的方法
         responseHeaders.set("Access-Control-Allow-Headers", "*"); // 允许所有请求头
 
+        // 允许将目标页内嵌到 iframe（网盘分享页等常带 X-Frame-Options / CSP frame-ancestors 阻止内嵌）
+        responseHeaders.delete("X-Frame-Options");
+        responseHeaders.delete("x-frame-options");
+        responseHeaders.delete("Content-Security-Policy");
+        responseHeaders.delete("content-security-policy");
+        // 暴露给前端读取（如需）
+        responseHeaders.set("X-Embed-Allowed", "true");
+
         // 处理 CORS 预检请求 (OPTIONS) - 放在这里确保所有响应都处理
          if (request.method === "OPTIONS") {
              // 使用下面的 onOptions 函数可以更规范，但在这里处理也可以

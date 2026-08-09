@@ -119,6 +119,11 @@ const API_SITES = {
         name: '空内容测试源',
         adult: true
     },
+    panhub: {
+        api: 'https://panhub-shenzjd-com.jjyydd.workers.dev',
+        name: 'PanHub网盘',
+        type: 'pan'
+    },
     //ARCHIVE https://telegra.ph/APIs-08-12
 };
 
@@ -198,6 +203,33 @@ const API_CONFIG = {
 
 // 优化后的正则表达式模式
 const M3U8_PATTERN = /\$https?:\/\/[^"'\s]+?\.m3u8/g;
+
+// 网盘源（PanHub）配置：搜索接口形态与响应字段映射
+const PAN_CONFIG = {
+    search: {
+        // PanHub 搜索接口基址之后的路径；kw 走查询参数，结果按网盘类型分组
+        path: '/api/search?kw=',
+        params: '&res=merged_by_type&src=all',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'application/json'
+        }
+    },
+    // 网盘类型标识 -> 中文展示名
+    cloudLabels: {
+        quark: '夸克网盘',
+        aliyun: '阿里云盘',
+        baidu: '百度网盘',
+        uc: 'UC网盘',
+        '115': '115网盘',
+        xunlei: '迅雷云盘',
+        tianyi: '天翼云盘',
+        '123': '123网盘',
+        mobile: '移动云盘',
+        magnet: '磁力链接'
+    }
+};
+window.PAN_CONFIG = PAN_CONFIG;
 
 // 添加自定义播放器URL
 const CUSTOM_PLAYER_URL = 'player.html'; // 使用相对路径引用本地player.html

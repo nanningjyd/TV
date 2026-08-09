@@ -89,6 +89,7 @@ function initAPICheckboxes() {
     Object.keys(API_SITES).forEach(apiKey => {
         const api = API_SITES[apiKey];
         if (api.adult) return; // 跳过成人内容API，稍后添加
+        if (api.type === 'pan') return; // 网盘源单独成组，下方处理
 
         const checked = selectedAPIs.includes(apiKey);
 
@@ -110,6 +111,37 @@ function initAPICheckboxes() {
         });
     });
     container.appendChild(normaldiv);
+
+    // 添加网盘源组（PanHub 等返回网盘分享链接的源）
+    const panKeys = Object.keys(API_SITES).filter(k => API_SITES[k].type === 'pan');
+    if (panKeys.length) {
+        const pandiv = document.createElement('div');
+        pandiv.id = 'pandiv';
+        pandiv.className = 'grid grid-cols-2 gap-2 mt-3';
+        const panTitle = document.createElement('div');
+        panTitle.className = 'api-group-title';
+        panTitle.textContent = '网盘源';
+        pandiv.appendChild(panTitle);
+
+        panKeys.forEach(apiKey => {
+            const api = API_SITES[apiKey];
+            const checked = selectedAPIs.includes(apiKey);
+            const checkbox = document.createElement('div');
+            checkbox.className = 'flex items-center';
+            checkbox.innerHTML = `
+                <input type="checkbox" id="api_${apiKey}"
+                       class="form-checkbox h-3 w-3 text-blue-600 bg-[#222] border border-[#333]"
+                       ${checked ? 'checked' : ''}
+                       data-api="${apiKey}">
+                <label for="api_${apiKey}" class="ml-1 text-xs text-gray-400 truncate">${api.name}</label>
+            `;
+            pandiv.appendChild(checkbox);
+            checkbox.querySelector('input').addEventListener('change', function () {
+                updateSelectedAPIs();
+            });
+        });
+        container.appendChild(pandiv);
+    }
 
     // 添加成人API列表
     addAdultAPI();
@@ -782,7 +814,38 @@ async function search() {
         }
 
         // 添加XSS保护，使用textContent和属性转义
+        const panStore = []; // 网盘源结果暂存，供弹窗按索引取用，避免内联字符串转义问题
         const safeResults = allResults.map(item => {
+            // 网盘源：直接以弹窗内嵌/打开网盘分享页，不走 showDetails
+            if (item.type === 'pan') {
+                const idx = panStore.push(item) - 1;
+                const safeName = (item.vod_name || '').toString()
+                    .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                const safePwd = (item.pan_password || '').toString()
+                    .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                const cloud = (item.type_name || '网盘').toString()
+                    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const src = (item.source_name || '').toString()
+                    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `
+                    <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md"
+                         onclick="openPanModal(${idx})">
+                        <div class="p-2 flex flex-col flex-grow">
+                            <div class="flex-grow">
+                                <h3 class="font-semibold mb-2 break-words line-clamp-2" title="${safeName}">${safeName}</h3>
+                                <div class="flex flex-wrap gap-1 mb-2">
+                                    <span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-green-500 text-green-300">${cloud}</span>
+                                </div>
+                                <p class="text-gray-400 line-clamp-2 overflow-hidden mb-2">${safePwd ? ('提取码: ' + safePwd) : '无提取码'}</p>
+                            </div>
+                            <div class="flex justify-between items-center mt-1 pt-1 border-t border-gray-800">
+                                <div class="flex items-center gap-1 flex-wrap"><span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${src}</span></div>
+                                <span class="text-xs text-blue-300 flex-shrink-0 ml-2">点击打开网盘</span>
+                            </div>
+                        </div>
+                    </div>`;
+            }
+
             const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
             const safeName = (item.vod_name || '').toString()
                 .replace(/</g, '&lt;')
@@ -852,6 +915,7 @@ async function search() {
         }).join('');
 
         resultsDiv.innerHTML = safeResults;
+        window.__panStore = panStore;
 
         // 更新每个来源的健康状态（先显示缓存，再异步探活刷新）
         updateResultHealth(allResults);
@@ -910,6 +974,8 @@ function updateResultHealth(results) {
     if (!window.SourceHealth || !Array.isArray(results)) return;
     const codes = [...new Set(results.map(r => r.source_code).filter(Boolean))];
     codes.forEach(code => {
+        // 网盘源（PanHub）无苹果CMS健康探测接口，跳过
+        if (API_SITES[code] && API_SITES[code].type === 'pan') return;
         const cached = window.SourceHealth.getCached(code);
         if (cached) setHealthBadge(code, cached);
         window.SourceHealth.check(code, false)
@@ -1027,6 +1093,12 @@ async function showDetails(id, vod_name, sourceCode) {
     }
     if (!id) {
         showToast('视频ID无效', 'error');
+        return;
+    }
+
+    // 网盘源没有传统详情页，引导用户在搜索结果中直接打开
+    if (API_SITES[sourceCode] && API_SITES[sourceCode].type === 'pan') {
+        showToast('网盘源请在搜索结果中直接点击打开', 'info');
         return;
     }
 
@@ -1229,6 +1301,90 @@ function closeVideoPlayer(home = false) {
     if (home) {
         // 刷新主页
         window.location.href = '/'
+    }
+}
+
+// 关闭网盘源弹窗
+function closePanModal() {
+    const box = document.getElementById('panModal');
+    if (box) box.remove();
+}
+
+// 复制文本到剪贴板（供网盘弹窗使用）
+function copyText(text) {
+    const t = decodeURIComponent(text || '');
+    navigator.clipboard.writeText(t).then(() => {
+        showToast('已复制: ' + t, 'success');
+    }).catch(() => {
+        showToast('复制失败，请检查浏览器权限', 'error');
+    });
+}
+
+// 打开网盘源弹窗：内嵌网盘分享页 + 「在网盘打开」按钮（PanHub 仅返回分享页链接，非播放直链）
+async function openPanModal(idx) {
+    const item = (window.__panStore && window.__panStore[idx]) || null;
+    if (!item) return;
+    const url = item.pan_url || '';
+    if (!url) return;
+    const name = item.vod_name || '网盘资源';
+    const pwd = item.pan_password || '';
+    const cloud = item.type_name || '网盘';
+
+    // 关闭可能存在的详情弹窗
+    const detailModal = document.getElementById('modal');
+    if (detailModal) detailModal.classList.add('hidden');
+
+    // 移除旧弹窗
+    let box = document.getElementById('panModal');
+    if (box) box.remove();
+
+    box = document.createElement('div');
+    box.id = 'panModal';
+    box.className = 'fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50 p-4';
+
+    const safeName = (name + '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeCloud = (cloud + '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const encUrl = encodeURIComponent(url);
+    const encPwd = encodeURIComponent(pwd);
+
+    box.innerHTML = `
+        <div class="bg-[#191919] rounded-lg w-full max-w-5xl h-[90vh] flex flex-col relative overflow-hidden">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-[#333]">
+                <div class="min-w-0">
+                    <h3 class="font-semibold truncate" title="${safeName}">${safeName}</h3>
+                    <div class="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
+                        <span class="text-green-300">${safeCloud}</span>
+                        ${pwd ? `<span>提取码: <code class="bg-[#222] px-1 rounded">${pwd}</code></span>` : ''}
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 flex-shrink-0 ml-3">
+                    ${pwd ? `<button onclick="copyText('${encPwd}')" class="px-3 py-1.5 bg-[#333] hover:bg-[#444] rounded text-sm transition-colors">复制提取码</button>` : ''}
+                    <button onclick="window.open(decodeURIComponent('${encUrl}'), '_blank')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors">在网盘打开</button>
+                    <button onclick="closePanModal()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+                </div>
+            </div>
+            <div class="flex-grow relative bg-black">
+                <iframe id="panFrame" src="" class="w-full h-full border-0" referrerpolicy="no-referrer"></iframe>
+                <div class="absolute bottom-2 left-2 right-2 text-center pointer-events-none">
+                    <span class="text-[11px] text-gray-400 bg-black/50 px-2 py-1 rounded">若网盘禁止内嵌显示，请点击右上角「在网盘打开」</span>
+                </div>
+            </div>
+        </div>`;
+
+    // 点击遮罩关闭
+    box.addEventListener('click', (e) => { if (e.target === box) closePanModal(); });
+
+    document.body.appendChild(box);
+
+    // 经内部代理加载网盘页（代理已剥离 X-Frame-Options/CSP，尽力内嵌）
+    try {
+        const proxied = await (window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
+            ? window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encUrl)
+            : Promise.resolve(PROXY_URL + encUrl));
+        const frame = document.getElementById('panFrame');
+        if (frame) frame.src = proxied;
+    } catch (e) {
+        console.warn('网盘页代理加载失败:', e);
     }
 }
 

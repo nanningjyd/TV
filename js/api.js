@@ -19,6 +19,17 @@ async function handleApiRequest(url) {
             if (!API_SITES[source] && source !== 'custom') {
                 throw new Error('无效的API来源');
             }
+
+            // 网盘源（PanHub）分支：接口形态与普通苹果CMS源不同
+            if (API_SITES[source] && API_SITES[source].type === 'pan') {
+                const panResults = await searchPanHub(
+                    API_SITES[source].api,
+                    source,
+                    API_SITES[source].name,
+                    searchQuery
+                );
+                return JSON.stringify({ code: 200, list: panResults });
+            }
             
             const apiUrl = customApi
                 ? `${customApi}${API_CONFIG.search.path}${encodeURIComponent(searchQuery)}`
