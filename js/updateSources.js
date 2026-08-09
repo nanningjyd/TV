@@ -149,6 +149,15 @@ const UpdateSources = (function () {
         // 去掉所有 HTML 标签（顺带把 <br>/<p> 等折叠为空格）
         text = text.replace(/<[^>]+>/g, ' ');
 
+        // 解码 HTML 实体：telegra.ph 等归档会把引号编码成 &#39; / &quot;，
+        // 不解码会导致字符串引号识别失败、花括号配平崩溃，进而“未找到源”。
+        text = text
+            .replace(/&#39;/g, "'").replace(/&apos;/g, "'")
+            .replace(/&quot;/g, '"')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&nbsp;/g, ' ');
+
         const result = {};
         const apiRe = /api\s*:/g;
         let m;
@@ -355,6 +364,8 @@ async function openUpdateSources() {
     if (btnNew) btnNew.disabled = true;
     if (btnAll) btnAll.disabled = true;
     if (btnC) btnC.disabled = true;
+    const btnEn = document.getElementById('btnEnableUnselected');
+    if (btnEn) btnEn.disabled = true;
     statusEl.textContent = '开始从外部来源发现 / 同步视频源…';
     resultsEl.innerHTML = '<div class="text-gray-500">正在分析，请稍候…</div>';
 
@@ -370,22 +381,35 @@ async function openUpdateSources() {
         const addedCodes = Object.keys(added);
         const extCodes = Object.keys(externalAll);
 
+        // 计算“已勾选”的外部源数量（区分“可用池”与“已勾选”，避免和设置里的已选数量混淆）
+        const selectedArr = (typeof selectedAPIs !== 'undefined' && Array.isArray(selectedAPIs))
+            ? selectedAPIs.filter(c => !String(c).startsWith('custom_'))
+            : [];
+        const selectedSet = new Set(selectedArr);
+        const extUnselected = extCodes.filter(c => !selectedSet.has(c));
+
         if (addedCodes.length) {
             statusEl.textContent = `从外部来源发现 ${addedCodes.length} 个新源，正在进行健康检查…`;
             const results = await SourceHealth.checkMany(addedCodes, {
                 concurrency: 5,
                 onProgress: (d, t) => { statusEl.textContent = `健康检查 ${d}/${t}…`; }
             });
-            renderUpdateResults(results, added, externalAll, diagnostics, 'new');
+            renderUpdateResults(results, added, externalAll, diagnostics, 'new', extUnselected.length);
             if (btnNew) btnNew.disabled = false;
             if (btnAll) btnAll.disabled = extCodes.length === 0;
             if (btnC) btnC.disabled = extCodes.length === 0;
         } else {
-            statusEl.textContent = `未发现新源 —— 本机已覆盖外部全部 ${extCodes.length} 个已知源。`;
-            renderUpdateResults({}, added, externalAll, diagnostics, 'uptodate');
+            if (extUnselected.length) {
+                statusEl.textContent = `未发现新源 —— 外部已知 ${extCodes.length} 个源本机均已可用，但其中 ${extUnselected.length} 个你尚未勾选。`;
+            } else {
+                statusEl.textContent = `未发现新源 —— 本机已覆盖外部全部 ${extCodes.length} 个已知源（且均已勾选）。`;
+            }
+            renderUpdateResults({}, added, externalAll, diagnostics, 'uptodate', extUnselected.length);
             if (btnNew) btnNew.disabled = true;
             if (btnAll) btnAll.disabled = extCodes.length === 0;
             if (btnC) btnC.disabled = extCodes.length === 0;
+            const btnEn = document.getElementById('btnEnableUnselected');
+            if (btnEn) btnEn.disabled = extUnselected.length === 0;
         }
     } catch (e) {
         statusEl.textContent = '更新失败：' + (e && e.message ? e.message : e);
@@ -393,7 +417,7 @@ async function openUpdateSources() {
     }
 }
 
-function renderUpdateResults(results, added, externalAll, diagnostics, mode) {
+function renderUpdateResults(results, added, externalAll, diagnostics, mode, unselectedCount) {
     const resultsEl = document.getElementById('updateSourcesResults');
     if (!resultsEl) return;
     let html = '';
@@ -432,9 +456,14 @@ function renderUpdateResults(results, added, externalAll, diagnostics, mode) {
     }
 
     if (mode === 'uptodate') {
+        const uc = (typeof unselectedCount === 'number') ? unselectedCount : 0;
         html += '<div class="mt-3 text-xs text-gray-500 bg-[#111] rounded p-2">';
         html += '<div class="mb-1 text-gray-400">说明：当前已激活的源已包含全部外部已知源，故无“新”源。</div>';
-        html += '<div class="mb-1">可点“合并全部外部源”统一刷新本地列表，或“提交全站”把外部全集写回站点。</div>';
+        html += `<div class="mb-1">外部共 ${extCodes.length} 个已知源：本机可用池已全部覆盖；其中你已勾选 ${extCodes.length - uc} 个，另有 <span class="text-yellow-400">${uc} 个可用但还没勾选</span>。</div>`;
+        if (uc > 0) {
+            html += `<div class="mb-1">点下方“启用未勾选源”即可把这 ${uc} 个源加入你的已选列表，搜索时就能用到。</div>`;
+        }
+        html += '<div class="mb-1">也可点“合并全部外部源”统一刷新本地列表，或“提交全站”把外部全集写回站点。</div>';
         html += '</div>';
         if (diagnostics && diagnostics.length) {
             html += '<div class="mt-2 text-xs text-gray-500 bg-[#111] rounded p-2 max-h-32 overflow-auto"><div class="mb-1 text-gray-400">扫描诊断：</div>';
@@ -485,6 +514,24 @@ function previewAllExternal() {
     }
     mergeIntoExtended(_discovered.externalAll);
     showToast('已合并全部外部源 ' + Object.keys(_discovered.externalAll).length + ' 个（刷新后仍生效，未提交全站）', 'success');
+}
+
+// 把外部已知但当前未勾选的源，加入“已选列表”（让它们真正出现在搜索可选范围里）
+function enableUnselectedSources() {
+    if (!_discovered) return;
+    const sel = (typeof selectedAPIs !== 'undefined' && Array.isArray(selectedAPIs)) ? selectedAPIs.slice() : [];
+    const set = new Set(sel);
+    const extCodes = Object.keys(_discovered.externalAll);
+    let added = 0;
+    extCodes.forEach(c => {
+        if (!set.has(c)) { set.add(c); sel.push(c); added++; }
+    });
+    selectedAPIs = sel;
+    try { localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs)); } catch (e) { /* ignore */ }
+    if (typeof renderApiCheckboxes === 'function') renderApiCheckboxes();
+    if (typeof updateSelectedApiCount === 'function') updateSelectedApiCount();
+    showToast('已启用 ' + added + ' 个未勾选的源（已加入已选列表）', 'success');
+    closeUpdateSources();
 }
 
 async function commitUpdatedSources() {
